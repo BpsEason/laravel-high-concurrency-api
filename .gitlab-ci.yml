@@ -1,0 +1,98 @@
+# .gitlab-ci.yaml (更新後的CI/CD配置，強調服務、佇列worker、JWT Secret和測試指令)
+image: docker:latest
+
+services:
+  - docker:dind
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "" # Required for dind service
+  MYSQL_DATABASE: laravel
+  MYSQL_USER: user
+  MYSQL_PASSWORD: password
+  MYSQL_ROOT_PASSWORD: root_password
+  REDIS_PORT: 6379 # Default Redis port
+  JWT_SECRET: "$JWT_SECRET" # Defined as CI/CD variable
+  # You might want to define PRODUCTION_SERVER_IP, SSH_USER, SSH_PRIVATE_KEY for deploy_production stage
+
+stages:
+  - build
+  - test
+  - deploy
+
+build_images:
+  stage: build
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    # Build the application image using multi-stage Dockerfile
+    - docker build -t $CI_REGISTRY_IMAGE/app:latest -f Dockerfile .
+    - docker push $CI_REGISTRY_IMAGE/app:latest
+    # Pull base images for consistency, though not strictly needed if app image is built
+    - docker pull nginx:alpine
+    - docker pull mysql:8.0
+    - docker pull redis:alpine
+  tags:
+    - docker
+
+run_tests:
+  stage: test
+  image: $CI_REGISTRY_IMAGE/app:latest # Use the built app image
+  services:
+    - name: mysql:8.0
+      alias: mysql # Alias for Laravel's DB_HOST
+    - name: redis:alpine
+      alias: redis # Alias for Laravel's REDIS_HOST
+  variables:
+    # Pass database credentials to the test environment
+    MYSQL_DATABASE: $MYSQL_DATABASE
+    MYSQL_USER: $MYSQL_USER
+    MYSQL_PASSWORD: $MYSQL_PASSWORD
+    # Pass Redis host and port
+    REDIS_HOST: redis
+    REDIS_PORT: $REDIS_PORT
+    # Pass JWT secret for authentication tests
+    JWT_SECRET: $JWT_SECRET
+    # Set queue connection to sync for immediate job execution during tests
+    QUEUE_CONNECTION: sync
+  script:
+    - cp .env.example .env
+    - echo "DB_HOST=mysql" >> .env
+    - echo "REDIS_HOST=redis" >> .env
+    - echo "REDIS_PORT=$REDIS_PORT" >> .env
+    - echo "JWT_SECRET=$JWT_SECRET" >> .env
+    - echo "QUEUE_CONNECTION=sync" >> .env # Make jobs run synchronously for testing
+
+    - composer install --no-dev # Install production dependencies, dev dependencies are handled by the image
+    - php artisan migrate:fresh --seed --env=testing # Fresh migration and seed for testing
+    - php artisan jwt:secret # Generate JWT secret for tests
+    - php artisan test --fail-on-warning # Run tests, fail if warnings occur
+  tags:
+    - docker
+
+deploy_production:
+  stage: deploy
+  image: alpine/helm:3.8.1 # Example image if using Helm for K8s deployment
+  script:
+    - echo "Deploying to production..."
+    # Placeholder for actual K8s/Helm deployment or secure SSH deployment
+    # Example using SSH (less scalable for production, but was in original README)
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh -o StrictHostKeyChecking=no $SSH_USER@$PRODUCTION_SERVER_IP "
+        cd /path/to/your/app/on/server &&
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+        docker-compose pull &&
+        docker-compose down &&
+        docker-compose up -d --build # --build is for rebuilding locally if image not found or forced
+      "
+    # Example using Helm (preferred for K8s)
+    # - helm upgrade --install my-laravel-app ./helm-chart --set image.tag=$CI_COMMIT_SHA --set secrets.jwtSecret=$JWT_SECRET ...
+  environment:
+    name: production
+    url: http://$PRODUCTION_SERVER_IP # Replace with actual production URL
+  only:
+    - main # Only deploy on push to main branch
+  tags:
+    - docker
