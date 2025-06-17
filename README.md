@@ -29,7 +29,7 @@ This project demonstrates a scalable RESTful API built with Laravel, leveraging 
 ### Local Setup with Docker Compose
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/laravel-high-concurrency-api.git
+   git clone [https://github.com/your-username/laravel-high-concurrency-api.git](https://github.com/BpsEason/laravel-high-concurrency-api.git)
    cd laravel-high-concurrency-api
    ```
 2. Create `.env` file and generate JWT secret:
