@@ -1,0 +1,43 @@
+{
+    "name": "laravel/laravel",
+    "type": "project",
+    "require": {
+        "php": "^8.2",
+        "laravel/framework": "^10.0",
+        "tymon/jwt-auth": "^2.0",
+        "predis/predis": "^2.0"  // 新增 Redis 庫支持
+        // "laravel/horizon": "^5.0" // 如果使用 Laravel Horizon 監控佇列，則解開註釋
+    },
+    "require-dev": {
+        "fakerphp/faker": "^1.9.1",
+        "laravel/pint": "^1.0",
+        "phpunit/phpunit": "^10.0",
+        "mockery/mockery": "^1.6" // 確保 Mockery 在開發依賴中，因為 ItemServiceTest 使用它
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/",
+            "Database\\Factories\\": "database/factories/",
+            "Database\\Seeders\\": "database/seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "php artisan test"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "php-http/discovery": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

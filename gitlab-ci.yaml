@@ -1,0 +1,87 @@
+image: docker:latest
+
+services:
+  - docker:dind
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  MYSQL_DATABASE: laravel
+  MYSQL_USER: user
+  MYSQL_PASSWORD: password
+  MYSQL_ROOT_PASSWORD: root_password
+  JWT_SECRET: "$JWT_SECRET" # 這裡最好也定義成 CI/CD 變數
+
+stages:
+  - build
+  - test
+  - deploy
+
+build_images:
+  stage: build
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build -t $CI_REGISTRY_IMAGE/app:latest -f Dockerfile .
+    - docker push $CI_REGISTRY_IMAGE/app:latest
+    # 這些 pull 是為了確保本地快取有，但實際 CI/CD 中，通常只需要 app 鏡像
+    - docker pull nginx:alpine
+    - docker pull mysql:8.0
+    - docker pull redis:alpine
+  tags:
+    - docker
+
+run_tests:
+  stage: test
+  image: $CI_REGISTRY_IMAGE/app:latest
+  services:
+    - name: mysql:8.0
+      alias: mysql
+    - name: redis:alpine # 新增 Redis 服務
+      alias: redis # 給予別名，讓 Laravel 可以透過 'redis' hostname 訪問
+  variables:
+    MYSQL_DATABASE: $MYSQL_DATABASE
+    MYSQL_USER: $MYSQL_USER
+    MYSQL_PASSWORD: $MYSQL_PASSWORD
+    REDIS_HOST: redis # 設定 Redis 主機為服務別名
+    REDIS_PORT: 6379
+    # JWT_SECRET 在此階段也需要，確保測試環境能正常生成和驗證 JWT
+    JWT_SECRET: "$JWT_SECRET"
+  script:
+    - cp .env.example .env
+    - echo "DB_HOST=mysql" >> .env
+    - echo "REDIS_HOST=redis" >> .env # 將 Redis 主機寫入 .env
+    - echo "QUEUE_CONNECTION=sync" >> .env # 為了讓測試時 Job 立即執行，可以設為 sync
+    # 如果想真實測試異步，這裡可以設為 redis 或 database，並啟動一個 queue:work
+    # - echo "QUEUE_CONNECTION=redis" >> .env
+    # - php artisan queue:work --once & # 在後台啟動一個單次執行的 Worker
+
+    - composer install --no-dev
+    - php artisan migrate:fresh --seed --env=testing
+    - php artisan jwt:secret # 生成 JWT Secret
+    - php artisan test --fail-on-warning # 運行測試，可以加上 --fail-on-warning 讓警告也導致測試失敗
+  tags:
+    - docker
+
+deploy_production:
+  stage: deploy
+  image: alpine/helm:3.8.1
+  script:
+    - echo "Deploying to production..."
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh -o StrictHostKeyChecking=no $SSH_USER@$PRODUCTION_SERVER_IP "
+        cd /path/to/your/app/on/server &&
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+        docker-compose pull &&
+        docker-compose down &&
+        docker-compose up -d --build
+      "
+  environment:
+    name: production
+    url: http://$PRODUCTION_SERVER_IP
+  only:
+    - main
+  tags:
+    - docker
