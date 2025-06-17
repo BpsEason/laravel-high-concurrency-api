@@ -1,363 +1,221 @@
+```markdown
 # Laravel 高併發 API 範例
 
-此專案展示了一個使用 Laravel 建構的 RESTful API，專注於高併發庫存管理，結合 **Redis 原子操作**、**異步佇列** 和 **JWT 認證**，提供高效、安全的解決方案。專案採用 **Docker** 容器化和 **GitLab CI/CD** 自動化部署，適合快速開發、測試和分享到 GitHub。
+此專案展示了一個使用 Laravel 建構的 RESTful API，專注於高併發庫存管理，結合 **Redis 原子操作**、**異步佇列** 和 **JWT 認證**，提供高效、安全的解決方案。專案採用 **Docker** 容器化，適合快速開發、測試和部署。
 
 ## 功能特性
 
-- **RESTful API**：清晰的 API 端點，支援版本控制（`/api/v1`）。
-- **JWT 認證**：使用 `tymon/jwt-auth` 實現安全身份驗證。
-- **Redis 原子操作**：透過 `WATCH`、`MULTI`、`EXEC` 和 `SETNX` 實現高併發庫存扣減，防止超賣。
-- **分散式鎖**：使用 Redis `SETNX` 實現鎖定，支援重試（隨機退避 10-200ms，最多 5 次）。
-- **異步資料庫更新**：Redis 扣減後，透過 Laravel 佇列（`UpdateItemStock` Job）異步更新 MySQL，提升響應速度。
-- **錯誤處理**：自訂異常（`StockInsufficientException`、`RedisOperationException`）提供明確錯誤訊息和日誌。
-- **Repository 模式**：解耦資料庫和 Redis 操作，增強可維護性。
-- **軟刪除**：商品支援邏輯刪除（`deleted_at`），已刪除商品不可購買。
-- **庫存保護**：資料庫（`unsignedInteger`）和模型（`setStockAttribute`）確保庫存非負。
-- **Docker 環境**：使用 `docker-compose` 提供一致的開發和測試環境。
-- **CI/CD 自動化**：透過 GitLab CI/CD 實現建置、測試和部署。
-- **測試支援**：包含單元測試、功能測試和壓力測試（Locust）。
-
-## 技術棧
-
-- **後端**：Laravel 10.x（PHP 8.2+）
-- **資料庫**：MySQL 8.0
-- **快取/鎖定/佇列**：Redis
-- **認證**：Tymon/JWT-Auth
-- **容器化**：Docker, Docker Compose
-- **CI/CD**：GitLab CI/CD
-
-## 快速開始
-
-### 前置條件
-
-- 安裝 [Docker](https://www.docker.com/get-started/) 和 [Docker Compose](https://docs.docker.com/compose/install/)
-- Git 已配置
-- GitLab 帳號（用於 CI/CD）
-
-### 本地設置
-
-1. **複製儲存庫**：
-   ```bash
-   git clone https://github.com/BpsEason/laravel-high-concurrency-api.git
-   cd laravel-high-concurrency-api
-   ```
-
-2. **配置環境**：
-   - 複製 `.env` 範例：
-     ```bash
-     cp .env.example .env
-     ```
-   - 編輯 `.env`，確保包含以下關鍵變數：
-     ```env
-     APP_NAME=Laravel
-     APP_ENV=local
-     APP_KEY=base64:your_app_key_here
-     APP_DEBUG=true
-     APP_URL=http://localhost
-     DB_CONNECTION=mysql
-     DB_HOST=mysql
-     DB_PORT=3306
-     DB_DATABASE=laravel
-     DB_USERNAME=root
-     DB_PASSWORD=root
-     REDIS_HOST=redis
-     REDIS_PORT=6379
-     QUEUE_CONNECTION=redis
-     JWT_SECRET=your_jwt_secret_here
-     LOCK_MAX_RETRIES=5
-     LOCK_RETRY_DELAY_MIN=10000
-     LOCK_RETRY_DELAY_MAX=200000
-     TEST_USER_PASSWORD=password
-     ```
-   - 生成 `APP_KEY`：
-     ```bash
-     docker-compose exec app php artisan key:generate
-     ```
-
-3. **啟動 Docker 容器**：
-   ```bash
-   docker-compose up -d
-   ```
-
-4. **安裝依賴並生成 JWT Secret**：
-   ```bash
-   docker-compose exec app composer install
-   docker-compose exec app php artisan jwt:secret
-   ```
-   將生成的 `JWT_SECRET` 複製到 `.env`。
-
-5. **運行資料庫遷移**：
-   ```bash
-   docker-compose exec app php artisan migrate
-   ```
-
-6. **填充測試數據**：
-   ```bash
-   docker-compose exec app php artisan db:seed
-   ```
-
-7. **啟動佇列 Worker**：
-   - 長期運行（新終端或背景執行）：
-     ```bash
-     docker-compose exec app php artisan queue:work redis --queue=stock_updates
-     ```
-   - 或使用 Supervisor 管理（生產環境推薦）。
-
-### 注意
-- 確保 `users` 表遷移已運行（通常由 Laravel 預設提供）：
-  ```bash
-  docker-compose exec app php artisan migrate
-  ```
-
-### 訪問 API
-
-API 基礎 URL：`http://localhost/api/v1`
-
-## API 端點
-
-### 身份驗證 (`/api/v1/auth`)
-
-- **POST /auth/register**
-  - Body: `{ "name": "string", "email": "string", "password": "string" }`
-  - 描述：註冊新用戶
-- **POST /auth/login**
-  - Body: `{ "email": "string", "password": "string" }`
-  - 描述：登錄並獲取 JWT Token
-- **POST /auth/me**（需 `Authorization: Bearer <token>`）
-  - 描述：獲取當前用戶資訊
-- **POST /auth/logout**（需 `Authorization: Bearer <token>`）
-  - 描述：登出並使 Token 失效
-- **POST /auth/refresh**（需 `Authorization: Bearer <token>`）
-  - 描述：刷新 Token
-
-### 商品管理 (`/api/v1/items`)
-
-- **GET /items**
-  - 描述：列出所有商品
-- **GET /items/{id}**
-  - 描述：獲取指定商品
-- **POST /items/{id}/purchase**（需 `Authorization: Bearer <token>`）
-  - Body: `{ "quantity": integer }`
-  - 描述：購買商品，使用 Redis 原子操作和異步佇列
-
-## 高併發庫存管理
-
-### 實現邏輯
-
-1. **分散式鎖**（`ItemService.php`）：
-   - 使用 Redis `SETNX` 獲取鎖，失敗時隨機退避（10-200ms）重試，最多 5 次。
-   - 若無法獲取鎖，拋出 `RedisOperationException`。
-
-2. **Redis 原子操作**：
-   - 使用 `WATCH` 監聽庫存鍵，檢查庫存是否足夠。
-   - 若庫存為 `null`，從資料庫（排除軟刪除商品）初始化 Redis。
-   - 使用 `MULTI`/`DECRBY`/`EXEC` 執行原子扣減。
-   - 若事務失敗（併發衝突），拋出 `RedisOperationException`。
-
-3. **異步更新**（`UpdateItemStock.php`）：
-   - Redis 扣減成功後，分派 `UpdateItemStock` Job 到 `stock_updates` 佇列。
-   - Job 檢查資料庫庫存，執行 `decrement` 更新，記錄原始和新庫存。
-   - 支援 3 次重試，每次間隔 5 秒。
-
-4. **錯誤處理**：
-   - 庫存不足：拋出 `StockInsufficientException`，返回當前庫存。
-   - 商品不存在或已刪除：拋出 `RedisOperationException`。
-
-### 保護機制
-
-- **非負庫存**：資料庫（`unsignedInteger`）和模型（`setStockAttribute`）確保庫存非負。
-- **軟刪除**：已刪除商品無法購買，Redis 初始化排除軟刪除商品。
-- **日誌限流**：使用 `RateLimiter` 限制鎖失敗日誌頻率。
-
-## CI/CD 自動化
-
-專案使用 GitLab CI/CD（`.gitlab-ci.yml`）實現自動化建置、測試和部署，包含以下階段：
-
-1. **Build**：
-   - 建置並推送 Docker 映像（`app`）到 GitLab 容器註冊表。
-   - 快取 Composer 依賴，加速建置。
-
-2. **Test**：
-   - 在容器中運行單元測試（`php artisan test`），模擬 MySQL 和 Redis 環境。
-   - 啟動佇列 Worker，測試 `UpdateItemStock` Job 的異步行為。
-   - 驗證軟刪除和庫存扣減邏輯。
-
-3. **Deploy**：
-   - 透過 SSH 將 Docker Compose 配置和 `.env` 部署到生產伺服器。
-   - 自動運行遷移（`migrate --force`）和啟動佇列 Worker。
-   - 僅在 `main` 分支觸發。
-
-### CI/CD 配置
-
-1. 在 GitLab `Settings > CI/CD > Variables` 中設置：
-   - `JWT_SECRET`：JWT 密鑰（生成：`php artisan jwt:secret`）
-   - `APP_KEY`：Laravel 應用密鑰（生成：`php artisan key:generate`）
-   - `SSH_USER`：生產伺服器 SSH 用戶名
-   - `SSH_PRIVATE_KEY`：SSH 私鑰（標記為 Masked）
-   - `PRODUCTION_SERVER_IP`：生產伺服器 IP
-   - `CI_REGISTRY_USER`：GitLab 容器註冊表用戶
-   - `CI_REGISTRY_PASSWORD`：GitLab 容器註冊表密碼
-   - `CI_REGISTRY_IMAGE`：映像路徑（例如 `registry.gitlab.com/your-username/your-repo`）
-
-2. 推送程式碼到 `main` 分支：
-   ```bash
-   git push origin main
-   ```
-
-3. 檢查 CI/CD 進度：
-   - 前往 GitLab 的 `CI/CD > Pipelines` 查看建置、測試和部署結果。
-
-## 測試與調試
-
-### 運行測試
-
-1. 進入容器：
-   ```bash
-   docker-compose exec app bash
-   ```
-
-2. 執行單元測試：
-   ```bash
-   php artisan test
-   ```
-
-3. 測試購買端點：
-   - 使用 cURL：
-     ```bash
-     curl -X POST http://localhost/api/v1/auth/login \
-          -H "Content-Type: application/json" \
-          -d '{"email":"test@example.com","password":"password"}'
-     ```
-     獲取 Token 後：
-     ```bash
-     curl -X POST http://localhost/api/v1/items/1/purchase \
-          -H "Authorization: Bearer <token>" \
-          -H "Content-Type: application/json" \
-          -d '{"quantity":3}'
-     ```
-
-4. 測試軟刪除：
-   ```bash
-   docker-compose exec app php artisan tinker
-   App\Models\Item::find(1)->delete();
-   curl -X POST http://localhost/api/v1/items/1/purchase \
-        -H "Authorization: Bearer <token>" \
-        -H "Content-Type: application/json" \
-        -d '{"quantity":1}'
-   ```
-   應返回“商品 1 不存在或已被刪除”。
-
-5. 壓力測試（可選）：
-   - 安裝 [Locust](https://locust.io/)：
-     ```bash
-     pip install locust
-     ```
-   - 創建 `locustfile.py`：
-     ```python
-     from locust import HttpUser, task
-     class ApiUser(HttpUser):
-         @task
-         def purchase_item(self):
-             self.client.post("/api/v1/items/1/purchase", json={"quantity": 1}, headers={"Authorization": "Bearer <token>"})
-     ```
-   - 運行：
-     ```bash
-     locust -f locustfile.py --host=http://localhost
-     ```
-   - 訪問 `http://localhost:8089` 查看壓力測試結果。
-
-### 檢查日誌
-
-- 本地日誌：
-  ```bash
-  docker-compose exec app cat storage/logs/laravel.log
-  ```
-- 生產日誌：
-  ```bash
-  ssh $SSH_USER@$PRODUCTION_SERVER_IP 'docker-compose -f /app/laravel-api/docker-compose.yml logs app'
-  ```
-- 確認庫存更新（原始和新庫存）、鎖失敗或錯誤訊息。
+* **RESTful API**：清晰的 API 端點，支援版本控制（`/api/v1`）。
+* **JWT 認證**：使用 `tymon/jwt-auth` 實現安全身份驗證，包含註冊、登入、登出、獲取使用者資訊和刷新 Token 功能。
+* **Redis 原子操作**：透過 `WATCH`、`MULTI`、`EXEC` 和 `SETNX` 實現高併發庫存扣減，防止超賣。
+* **分散式鎖**：使用 Redis `SETNX` 實現商品操作鎖，支援重試（帶有隨機退避 10-200ms，最多 5 次嘗試）。
+* **異步資料庫更新**：Redis 庫存扣減成功後，透過 Laravel 佇列（`UpdateItemStock` Job）異步更新 MySQL 實際庫存，提升 API 響應速度。
+* **自定義錯誤處理**：定義了 `StockInsufficientException`（庫存不足）和 `RedisOperationException`（Redis 操作失敗，如併發衝突）等自定義異常，提供明確的錯誤訊息和狀態碼。
+* **Repository 模式**：解耦資料庫和 Redis 操作邏輯，增強代碼的可維護性和可測試性。
+* **軟刪除**：商品模型支援邏輯刪除（`deleted_at` 欄位），已軟刪除的商品無法被購買。
+* **庫存保護**：資料庫層面（`unsignedInteger` 類型）和模型層面（`setStockAttribute` Mutator）確保庫存值永不為負數。
+* **完整測試套件**：包含 Feature 和 Unit 測試，涵蓋認證、商品購買等核心功能，確保應用程式的穩定性和可靠性。
 
 ## 環境配置
 
-### .env 範例
+此專案基於 Docker 進行開發和部署，請確保您的系統已安裝 Docker 和 Docker Compose。
+
+### 1. 複製專案
+
+```bash
+git clone https://github.com/BpsEason/laravel-high-concurrency-api.git
+cd your-repo-name
+```
+
+### 2. 環境變數設定
+
+複製 `.env.example` 並重新命名為 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+更新 `.env` 檔案中的變數。以下是關鍵變數的範例配置：
 
 ```env
-APP_NAME=Laravel
+APP_NAME="Laravel High-Concurrency API"
 APP_ENV=local
-APP_KEY=base64:your_app_key_here
+APP_KEY= # 在安裝後生成
 APP_DEBUG=true
 APP_URL=http://localhost
+
+LOG_CHANNEL=stack
+LOG_DEPRECATIONS_CHANNEL=null
+LOG_LEVEL=debug
+
 DB_CONNECTION=mysql
 DB_HOST=mysql
 DB_PORT=3306
 DB_DATABASE=laravel
 DB_USERNAME=root
 DB_PASSWORD=root
+
 REDIS_HOST=redis
 REDIS_PORT=6379
-QUEUE_CONNECTION=redis
-JWT_SECRET=your_jwt_secret_here
+REDIS_CLIENT=predis
+
+BROADCAST_DRIVER=log
+CACHE_DRIVER=redis
+FILESYSTEM_DISK=local
+QUEUE_CONNECTION=redis # 設定為 redis 以使用佇列
+SESSION_DRIVER=file
+SESSION_LIFETIME=120
+
+MEMCACHED_HOST=127.0.0.1
+
+MAIL_MAILER=log
+MAIL_HOST=
+MAIL_PORT=
+MAIL_USERNAME=
+MAIL_PASSWORD=
+MAIL_ENCRYPTION=null
+MAIL_FROM_ADDRESS="hello@example.com"
+MAIL_FROM_NAME="${APP_NAME}"
+
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=
+AWS_USE_PATH_STYLE_ENDPOINT=false
+
+PUSHER_APP_ID=
+PUSHER_APP_KEY=
+PUSHER_APP_SECRET=
+PUSHER_APP_CLUSTER=mt1
+
+MIX_PUSHER_APP_KEY="${PUSHER_APP_KEY}"
+MIX_PUSHER_APP_CLUSTER="${PUSHER_APP_CLUSTER}"
+
+# JWT 認證密鑰
+JWT_SECRET= # 在安裝後生成
+
+# 分散式鎖配置
 LOCK_MAX_RETRIES=5
-LOCK_RETRY_DELAY_MIN=10000
-LOCK_RETRY_DELAY_MAX=200000
+LOCK_RETRY_DELAY_MIN=10000 # 微秒 (10ms)
+LOCK_RETRY_DELAY_MAX=200000 # 微秒 (200ms)
+
+# 測試用戶密碼
 TEST_USER_PASSWORD=password
 ```
 
-### Docker Compose
+### 3. Docker Compose 啟動服務
 
-`docker-compose.yml` 包含以下服務：
-- `app`：Laravel 應用（PHP-FPM）
-- `nginx`：Web 伺服器（端口 80）
-- `mysql`：資料庫（端口 3306）
-- `redis`：快取和佇列（端口 6379）
+`docker-compose.yaml` 檔案定義了以下服務：
 
-### 權限設置
+* `app`：Laravel 應用程式（PHP-FPM）。
+* `nginx`：Nginx Web 伺服器（監聽端口 80），將請求轉發給 `app` 服務。
+* `mysql`：MySQL 8.0 資料庫。
+* `redis`：Redis 服務，用於緩存、佇列和高併發鎖。
 
-若遇到儲存權限問題，運行：
+啟動所有服務：
+
+```bash
+docker-compose up -d --build
+```
+
+這將會建構 Docker 映像並在後台啟動所有容器。
+
+### 4. 安裝 Composer 依賴和生成應用程式密鑰
+
+進入 `app` 容器並執行安裝命令：
+
+```bash
+docker-compose exec app composer install
+docker-compose exec app php artisan key:generate
+```
+
+### 5. 生成 JWT Secret
+
+JWT 認證需要一個密鑰，運行以下命令生成：
+
+```bash
+docker-compose exec app php artisan jwt:secret
+```
+
+### 6. 運行資料庫遷移和填充數據
+
+```bash
+docker-compose exec app php artisan migrate --seed
+```
+
+### 7. 啟動佇列 Worker
+
+由於庫存更新是異步進行的，您需要啟動一個佇列 Worker 來處理 `UpdateItemStock` Job。
+
+```bash
+docker-compose exec app php artisan queue:work redis --queue=stock_updates
+```
+
+您可以選擇使用 Supervisor 來管理這個 Worker 進程，`supervisord.conf` 檔案已提供，它將在 `app` 容器啟動時自動運行 `php-fpm`。如果您需要同時運行多個 Worker 或其他進程，可以修改 `supervisord.conf`。
+
+### 8. 權限設置
+
+若遇到儲存或緩存權限問題，進入 `app` 容器並運行：
+
 ```bash
 docker-compose exec app chmod -R 775 storage bootstrap/cache
 docker-compose exec app chown -R www-data:www-data storage bootstrap/cache
 ```
 
-## 常見問題
+## API 端點
 
-- **佇列不運行**：
-  - 確認 `.env` 中 `QUEUE_CONNECTION=redis`。
-  - 啟動 Worker：
+API 基本 URL: `http://localhost/api/v1`
+
+| 方法 | 端點                              | 描述                                 | 認證要求     |
+| :--- | :-------------------------------- | :----------------------------------- | :----------- |
+| `POST` | `/auth/register`                  | 使用者註冊                           | 無           |
+| `POST` | `/auth/login`                     | 使用者登入並獲取 JWT Token         | 無           |
+| `POST` | `/auth/me`                        | 獲取當前認證使用者資訊               | JWT Token    |
+| `POST` | `/auth/logout`                    | 使用者登出 (使 JWT Token 失效)     | JWT Token    |
+| `POST` | `/auth/refresh`                   | 刷新過期的 JWT Token               | JWT Token    |
+| `GET`  | `/items`                          | 獲取所有商品列表                     | 無           |
+| `GET`  | `/items/{item}`                   | 獲取單一商品詳情                     | 無           |
+| `POST` | `/items/{item}/purchase`          | 購買指定商品並扣減庫存               | JWT Token    |
+
+## 執行測試
+
+運行應用程式測試：
+
+```bash
+docker-compose exec app php artisan test
+```
+
+## 常見問題 (FAQ)
+
+### 1. 佇列不運行？
+
+* 確認 `.env` 中 `QUEUE_CONNECTION=redis`。
+* 確認您已啟動佇列 Worker：
     ```bash
     docker-compose exec app php artisan queue:work redis --queue=stock_updates
     ```
-- **JWT 錯誤**：
-  - 確認 `JWT_SECRET` 已設置：
+
+### 2. JWT 錯誤 (例如 Token 無效或密鑰未設置)？
+
+* 確認 `JWT_SECRET` 已在 `.env` 中設置。如果沒有，請運行：
     ```bash
     docker-compose exec app php artisan jwt:secret
     ```
-- **庫存不一致**：
-  - 檢查 Redis（`docker-compose exec redis redis-cli`) 和資料庫（`docker-compose exec mysql mysql -uroot -proot laravel`）。
-  - 確保遷移和種子數據正確。
-- **用戶表不存在**：
-  - 確保 `users` 表遷移已運行：
-    ```bash
-    docker-compose exec app php artisan migrate
-    ```
 
-## 未來改進
+### 3. 庫存不一致 (Redis 和資料庫之間)？
 
-- 新增 API 限流（`throttle` 中間件）。
-- 支援國際化（i18n）錯誤訊息。
-- 整合日誌聚合（例如 ELK）。
-- 為 `items.name` 添加索引，優化查詢性能。
+雖然應用程式設計用於最大程度地減少不一致，但在極端情況下仍可能發生。如果 Redis 和資料庫之間的庫存出現不一致，您可以運行以下 Artisan 命令手動同步：
 
-## 貢獻
+```bash
+docker-compose exec app php artisan app:sync-stock # 同步所有商品
+docker-compose exec app php artisan app:sync-stock {itemId} # 同步特定商品，例如：php artisan app:sync-stock 1
+```
 
-歡迎提交 Issue 或 Pull Request！請遵循：
-1. Fork 儲存庫
-2. 創建特性分支（`git checkout -b feature/your-feature`）
-3. 提交變更（`git commit -m 'Add your feature'`）
-4. 推送分支（`git push origin feature/your-feature`）
-5. 開啟 Pull Request
+**請注意：** `app:sync-stock` 是一個自定義 Artisan 命令，您需要手動在 `app/Console/Commands` 目錄下創建並實現它。這個命令將會從 MySQL 資料庫讀取商品的實際庫存，然後更新 Redis 中的庫存值，以確保兩者保持同步。
 
-## 授權
+### 4. 服務無法訪問 (例如 502 Bad Gateway)？
 
-MIT License
+* 檢查 `docker-compose logs nginx` 和 `docker-compose logs app` 以查看日誌錯誤。
+* 確認 `nginx/default.conf` 中的 `fastcgi_pass app:9000;` 指向了正確的 PHP-FPM 服務名稱 (`app`) 和端口 (`9000`)。
+* 確認 `supervisord.conf` 中的 `php-fpm` 進程是否正確運行。
+```
